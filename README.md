@@ -1,15 +1,149 @@
-Technical Report: Host Connectivity in a Data Farm Course: Algorithms & Complexity  •  Implementation: Java  •  Scope: High-Scale Graph Evaluation   Problem Statement
-The goal of this project is to model and simulate optimized communication routes inside a data farm with up to 105 network links and 104 physical hosts. There are two main scenarios the system needs to handle: No budget (Budget = -1):  Find the shortest path in terms of latency from a source host to every other reachable host, with no restriction on the number of hops. With a budget (Budget ≥ 0):  Same idea, but you can only take at most K hops. This matters in practice since too many hops can cause packet drops across physical switches. There's also a bonus task: find the longest simple path (no cycles, no revisiting nodes) from the source to every destination.   Graph Representation & Data Structures
-Given the scale (up to 104 nodes, 105 edges), memory efficiency actually matters here, so the data structures were chosen carefully. Adjacency List ( List[] ):  Using a 2D matrix would mean allocating 10⁸ entries upfront, which just causes an  OutOfMemoryError . The adjacency list only allocates memory for real edges, keeping space at O(V + E) — much more manageable. Edge class:  Holds  int target  and  double weight  (latency in nanoseconds). Keeps related data together without extra overhead. NodePair class:  Pairs a node ID with a running distance. It implements  Comparable  so Java's  PriorityQueue  knows how to order entries — specifically using  Double.compare()  to avoid the rounding issues you get with plain subtraction on doubles.   Algorithmic Approach
-Scenario A: No hop limit — Dijkstra's
-For the unconstrained case, Dijkstra's algorithm is the natural choice. It uses a min-heap to always process the closest unvisited node first. The steps are roughly: Set all distances to infinity, except the source which starts at 0. Push the source into the priority queue. While the queue isn't empty, pop the node with the smallest distance. Skip it if we've already found a shorter path (stale entry check — saves a lot of unnecessary work). For each neighbor, if going through the current node is cheaper, update the distance and push the neighbor.   Scenario B: Hop-limited — Layered DP (Bellman-Ford variant)
-Standard Dijkstra breaks down here because it might discard a path early that was actually the only valid one within K hops. So instead, a layered DP approach is used: One iteration runs per hop, up to K total. At each step, the current distances array is cloned before any updates. This is the key part — without the clone, updates within the current hop bleed forward into the same iteration and give wrong results. After K iterations, the array holds the shortest paths reachable within that hop budget.   Modular Sub-Problems
-Breaking down the overall problem, three isolated sub-problems came up: Edge relaxation:  The standard check  dist[v] = min(dist[v], dist[u] + weight(u, v)) . Simple in theory but it has to be applied correctly in both scenarios. Layer isolation:  The  .clone()  in the bounded case is easy to forget but absolutely critical. Without it, the hop limit constraint just falls apart. Cycle prevention (bonus):  The DFS backtracking approach marks nodes as visited during traversal and unmarks them on the way back. Standard technique for enumerating simple paths.   Complexity Analysis The following table: Mode,Algorithm,Time,Space Unbounded,Dijkstra + min-heap,O((V+E) log V),O(V) Bounded,Layered DP (Bellman-Ford variant),O(K · (V+E)),O(V) Longest path (bonus),DFS backtracking,O(V!),O(V) stack   The O(V!) for the longest path is obviously not practical for large inputs — that's why there's a safety cap on that mode (see Section 7).   Code Snippets
-Snippet 1: NodePair — comparison override for the priority queue
-This tells Java's priority queue how to order path entries by latency:   class NodePair implements Comparable { int node; double distance; public NodePair(int node, double distance) { this.node = node; this.distance = distance; } @Override public int compareTo(NodePair other) { return Double.compare(this.distance, other.distance); } }   Snippet 2: Dijkstra main loop
-The  if (currDist > distances[u]) continue  line is what skips stale entries — without this, the algorithm would reprocess nodes it already settled:   while (!pq.isEmpty()) { NodePair current = pq.poll(); int u = current.node; double currDist = current.distance;
-if (currDist > distances[u]) continue; // stale path, skip for (Edge edge : adjList[u]) { double newDist = distances[u] + edge.weight; if (newDist < distances[edge.target]) { distances[edge.target] = newDist; pq.add(new NodePair(edge.target, newDist)); } } }   Snippet 3: Layer isolation in bounded mode
-The  .clone()  at the start of each iteration is what keeps hop layers independent from each other:   for (int k = 0; k < budget; k++) {
-double[] nextDistances = distances.clone(); // freeze current hop state for (int u = 0; u < n; u++) { if (distances[u] == Double.MAX_VALUE) continue; for (Edge edge : adjList[u]) { if (distances[u] + edge.weight < nextDistances[edge.target]) { nextDistances[edge.target] = distances[u] + edge.weight; } } } distances = nextDistances; }   Safety Considerations for Large Inputs
-Finding the longest simple path is NP-hard, so running the full DFS on large graphs will hit a  StackOverflowError  pretty quickly (there are potentially trillions of paths to explore recursively). To keep the program stable, if  n > 20 , the longest path search is simply skipped and the program moves on with the other results. Not the most elegant solution, but it keeps things from crashing on the larger test cases.   References
-Core path relaxation logic and priority queue usage based on standard graph routing theory. Layer-cloning technique for bounded shortest paths follows standard Bellman-Ford adaptations for hop-constrained variants. 
+# Host Connectivity in a Data Farm
+
+> **Course:** Algorithms & Complexity | **Language:** Java | **Scope:** High-Scale Graph Evaluation
+
+---
+
+## Problem Statement
+
+This project models and simulates optimized communication routes inside a data farm with up to **10⁵ network links** and **10⁴ physical hosts**.
+
+Two main scenarios are handled:
+
+- **No budget (`Budget = -1`):** Find the shortest path in terms of latency from a source host to every other reachable host, with no restriction on the number of hops.
+- **With a budget (`Budget ≥ 0`):** Same as above, but limited to at most **K hops**.
+
+> Too many hops can cause packet drops across physical switches — hence the hop constraint matters in practice.
+
+**Bonus:** Find the longest simple path (no cycles, no revisiting nodes) from the source to every destination.
+
+---
+
+## Graph Representation & Data Structures
+
+Given the scale (up to 10⁴ nodes and 10⁵ edges), memory efficiency is critical.
+
+| Structure | Description |
+|---|---|
+| `List<Edge>[]` (Adjacency List) | Only allocates memory for real edges — O(V + E) space vs. O(V²) for a matrix |
+| `Edge` | Holds `int target` and `double weight` (latency in nanoseconds) |
+| `NodePair` | Pairs a node ID with a running distance; implements `Comparable<NodePair>` for use in Java's `PriorityQueue` |
+
+---
+
+## Algorithmic Approach
+
+### Scenario A: No Hop Limit — Dijkstra's Algorithm
+
+Uses a min-heap to always process the closest node first.
+
+1. Set all distances to `∞` except the source (starts at `0`).
+2. Push the source into the priority queue.
+3. While the queue is not empty, pop the node with the smallest distance.
+4. Skip stale entries where a shorter path has already been found.
+5. Relax all outgoing edges and update distances when a shorter path is discovered.
+
+### Scenario B: Hop-Limited — Layered DP (Bellman-Ford Variant)
+
+Standard Dijkstra does not support strict hop limits — a more expensive path early on may be the only valid one within K hops.
+
+- Run **one iteration per hop**, up to K iterations.
+- **Clone** the current distance array before each update to ensure layer isolation.
+- After K iterations, the array holds the shortest paths reachable within the allowed hop count.
+
+---
+
+## Code Snippets
+
+### NodePair Comparison
+
+```java
+class NodePair implements Comparable<NodePair> {
+    int node;
+    double distance;
+
+    public NodePair(int node, double distance) {
+        this.node = node;
+        this.distance = distance;
+    }
+
+    @Override
+    public int compareTo(NodePair other) {
+        return Double.compare(this.distance, other.distance);
+    }
+}
+```
+
+### Dijkstra Main Loop
+
+```java
+while (!pq.isEmpty()) {
+    NodePair current = pq.poll();
+    int u = current.node;
+    double currDist = current.distance;
+
+    if (currDist > distances[u]) continue;
+
+    for (Edge edge : adjList[u]) {
+        double newDist = distances[u] + edge.weight;
+
+        if (newDist < distances[edge.target]) {
+            distances[edge.target] = newDist;
+            pq.add(new NodePair(edge.target, newDist));
+        }
+    }
+}
+```
+
+### Layer Isolation in Bounded Mode
+
+```java
+for (int k = 0; k < budget; k++) {
+    double[] nextDistances = distances.clone();
+
+    for (int u = 0; u < n; u++) {
+        if (distances[u] == Double.MAX_VALUE) continue;
+
+        for (Edge edge : adjList[u]) {
+            if (distances[u] + edge.weight < nextDistances[edge.target]) {
+                nextDistances[edge.target] = distances[u] + edge.weight;
+            }
+        }
+    }
+
+    distances = nextDistances;
+}
+```
+
+---
+
+## Complexity Analysis
+
+| Mode | Algorithm | Time Complexity | Space Complexity |
+|---|---|---|---|
+| Unbounded | Dijkstra + Min-Heap | O((V + E) log V) | O(V) |
+| Bounded | Layered DP (Bellman-Ford Variant) | O(K × (V + E)) | O(V) |
+| Longest Path (Bonus) | DFS Backtracking | O(V!) | O(V) stack |
+
+---
+
+## Safety Considerations
+
+Finding the longest simple path is **NP-hard**. Running full DFS on very large graphs may cause excessive execution time or stack overflow.
+
+> ⚠️ If `n > 20`, the longest path search is automatically skipped. Shortest path calculations continue normally.
+
+---
+
+## Modular Sub-Problems
+
+- **Edge relaxation:** `dist[v] = min(dist[v], dist[u] + weight(u, v))`
+- **Layer isolation:** `.clone()` prevents updates from the current hop from bleeding into other calculations in the same iteration.
+- **Cycle prevention (Bonus):** DFS backtracking marks nodes as visited and unmarks them on return, enabling correct simple path exploration.
+
+---
+
+## References
+
+- Standard graph theory — Dijkstra's algorithm and edge relaxation
+- Bellman-Ford adaptations for hop-constrained shortest path problems
